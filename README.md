@@ -9,4 +9,5 @@ Quick test with dummy simulated data from [`test`](test).
 
 ```sh
 miniwdl run --as-me -i test/test.inputs.json workflow.wdl
+miniwdl run --as-me -i test/test.inputs.ubam.json workflow.wdl
 ```

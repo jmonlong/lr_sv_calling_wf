@@ -9,6 +9,7 @@ workflow lr_sv_calling {
 
     parameter_meta {
         FASTQ: "Raw FASTQ reads. Optional. If provided and no BAM/BAI, alignment will be performed."
+        FASTQ_IS_UBAM: "Is the FASTQ file actually a unmapped BAM file? Default is false"
         BAM: "Aligned reads in BAM. Optional. If provided, no alignment performed."
         BAI: "Aligned reads index. Optional. If provided, no alignment performed."
         ALIGNER: "Which aligner to use? 'ngmlr' (default)"
@@ -19,6 +20,7 @@ workflow lr_sv_calling {
 
     input {
         File? FASTQ
+        Boolean FASTQ_IS_UBAM = false
         File? BAM
         File? BAI
         String ALIGNER = 'ngmlr'
@@ -34,7 +36,8 @@ workflow lr_sv_calling {
                 input:
                 fastq=select_first([FASTQ]),
                 reference_fa=REFERENCE_FASTA,
-                sample=SAMPLE
+                sample=SAMPLE,
+                ubam=FASTQ_IS_UBAM
             }
         }
 
@@ -73,6 +76,7 @@ task alignReadsNGMLR {
         File fastq
         File reference_fa
         String sample = ""
+        Boolean ubam = false
         Int threadCount = 32
         Int memoryGB = 16
         String dockerImage="quay.io/jmonlong/ngmlr@sha256:ce25d81d1a44f7bcdacef0008ac7542c5e9885d074f6446d6a8549219c91807e"
@@ -96,7 +100,14 @@ task alignReadsNGMLR {
 
         ln -s ~{reference_fa} ref.fa
 
-        ngmlr -t ~{threadAlign} -x ont --skip-write -r ref.fa -q ~{fastq} | samtools sort -@ ~{threadSort} -o ~{sample}_ngmlr.bam
+        if [ ~{ubam} == "true" ]
+        then
+            samtools fastq ~{fastq} | ngmlr -t ~{threadAlign} -x ont --skip-write -r ref.fa | samtools sort -@ ~{threadSort} -o ~{sample}_ngmlr.bam
+        else
+            ngmlr -t ~{threadAlign} -x ont --skip-write -r ref.fa -q ~{fastq} | samtools sort -@ ~{threadSort} -o ~{sample}_ngmlr.bam
+        fi
+
+        
         samtools index -@ ~{threadCount} ~{sample}_ngmlr.bam ~{sample}_ngmlr.bai
     >>>
     output {
