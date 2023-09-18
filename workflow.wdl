@@ -39,17 +39,11 @@ workflow lr_sv_calling {
         }
 
         File alignedBamFile = select_first([alignReadsNGMLR.bam])
-
-        call sortReads {
-            input:
-            bam=alignedBamFile,
-            sample=SAMPLE
-        }
-        
+        File alignedBaiFile = select_first([alignReadsNGMLR.bai])        
     }
 
-    File bamFile = select_first([BAM, sortReads.sorted_bam])
-    File baiFile = select_first([BAI, sortReads.sorted_bai])
+    File bamFile = select_first([BAM, alignedBamFile])
+    File baiFile = select_first([BAI, alignedBaiFile])
 
     if (CALLER == 'sniffles') {
         call callSVsniffles {
@@ -65,8 +59,8 @@ workflow lr_sv_calling {
     
     output {
         File sv_vcf = svVcf
-        File? bam = sortReads.sorted_bam
-        File? bai = sortReads.sorted_bai
+        File? bam = alignedBamFile
+        File? bai = alignedBaiFile
     }
 }
 
@@ -81,7 +75,7 @@ task alignReadsNGMLR {
         String sample = ""
         Int threadCount = 32
         Int memoryGB = 16
-        String dockerImage="quay.io/jmonlong/ngmlr"
+        String dockerImage="quay.io/jmonlong/ngmlr@sha256:ce25d81d1a44f7bcdacef0008ac7542c5e9885d074f6446d6a8549219c91807e"
         Int disk_size = 3 * round(size(fastq, 'G') + size(reference_fa, 'G')) + 20
     }
 
@@ -108,42 +102,6 @@ task alignReadsNGMLR {
     output {
         File bam = "~{sample}_ngmlr.bam"
         File bai = "~{sample}_ngmlr.bai"
-    }
-    runtime {
-        docker: dockerImage
-        cpu: threadCount
-        disks: "local-disk " + disk_size + " SSD"
-        memory: memoryGB + "GB"
-    }
-}
-
-task sortReads {
-    input {
-        File bam
-        String sample = ""
-        Int threadCount = 8
-        Int memoryGB = 8
-        String dockerImage="quay.io/biocontainers/samtools@sha256:6f88956b747a67b2a39a3ff72c4de30e665239ee11db610624dd4298e30db1bf"
-        Int disk_size = 3 * round(size(bam, 'G')) + 20
-    }
-    command <<<
-        # Set the exit code of a pipeline to that of the rightmost command
-        # to exit with a non-zero status, or zero if all commands of the pipeline exit
-        set -o pipefail
-        # cause a bash script to exit immediately when a command fails
-        set -e
-        # cause the bash shell to treat unset variables as an error and exit immediately
-        set -u
-        # echo each line of the script to stdout so we can see what is happening
-        # to turn off echo do 'set +o xtrace'
-        set -o xtrace
-
-        samtools sort -@ ~{threadCount} ~{bam} -o ~{sample}_sorted.bam
-        samtools index -@ ~{threadCount} ~{sample}_sorted.bam ~{sample}_sorted.bai
-    >>>
-    output {
-        File sorted_bam = "~{sample}_sorted.bam"
-        File sorted_bai = "~{sample}_sorted.bai"
     }
     runtime {
         docker: dockerImage
