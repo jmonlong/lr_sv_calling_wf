@@ -16,6 +16,7 @@ workflow lr_sv_calling {
         CALLER: "Which caller to use? 'sniffles' (default)"
         REFERENCE_FASTA: "Genome reference FASTA file"
         SAMPLE: "Optional. Sample name. "
+        READS_PER_CHUNK: "Number of input reads per chunk (to scale up alignment). Default is 700000"
     }
 
     input {
@@ -28,25 +29,41 @@ workflow lr_sv_calling {
         File? VNTR
         File REFERENCE_FASTA
         String SAMPLE = "sample"
+        Int READS_PER_CHUNK = 700000
     }
 
     if ( defined(FASTQ) && !defined(BAM) ){
+
+        call splitReads {
+	    input:
+	    reads = select_first([FASTQ]),
+            readsPerChunk = READS_PER_CHUNK,
+            ubam=FASTQ_IS_UBAM
+	}
+
         if ( ALIGNER == 'ngmlr') {
-            call alignReadsNGMLR {
-                input:
-                fastq=select_first([FASTQ]),
-                reference_fa=REFERENCE_FASTA,
-                sample=SAMPLE,
-                ubam=FASTQ_IS_UBAM
+            scatter (readChunk in splitReads.readChunks){
+                call alignReadsNGMLR {
+                    input:
+                    fastq=readChunk,
+                    reference_fa=REFERENCE_FASTA,
+                    sample=SAMPLE
+                }
             }
         }
 
-        File alignedBamFile = select_first([alignReadsNGMLR.bam])
-        File alignedBaiFile = select_first([alignReadsNGMLR.bai])        
+        Array[File] alignedBamFiles = select_all(select_first([alignReadsNGMLR.bam]))
+
+        call mergeBAM {
+	    input:
+	    bams = alignedBamFiles,
+            outname = SAMPLE,
+	}
+        
     }
 
-    File bamFile = select_first([BAM, alignedBamFile])
-    File baiFile = select_first([BAI, alignedBaiFile])
+    File bamFile = select_first([BAM, mergeBAM.bam])
+    File baiFile = select_first([BAI, mergeBAM.bai])
 
     if (CALLER == 'sniffles') {
         call callSVsniffles {
@@ -62,8 +79,8 @@ workflow lr_sv_calling {
     
     output {
         File sv_vcf = svVcf
-        File? bam = alignedBamFile
-        File? bai = alignedBaiFile
+        File? bam = mergeBAM.bam
+        File? bai = mergeBAM.bai
     }
 }
 
@@ -76,15 +93,14 @@ task alignReadsNGMLR {
         File fastq
         File reference_fa
         String sample = ""
-        Boolean ubam = false
-        Int threadCount = 32
-        Int memoryGB = 16
+        Int thread_count = 32
+        Int memory_gb = 16
         String dockerImage="quay.io/jmonlong/ngmlr@sha256:ce25d81d1a44f7bcdacef0008ac7542c5e9885d074f6446d6a8549219c91807e"
         Int disk_size = 3 * round(size(fastq, 'G') + size(reference_fa, 'G')) + 20
     }
 
-    Int threadSort = if threadCount > 8 then 4 else 1
-    Int threadAlign = if threadCount > 8 then threadCount - 4 else threadCount - 1
+    Int threadSort = if thread_count > 8 then 4 else 1
+    Int threadAlign = if thread_count > 8 then thread_count - 4 else thread_count - 1
     
     command <<<
         # Set the exit code of a pipeline to that of the rightmost command
@@ -100,15 +116,8 @@ task alignReadsNGMLR {
 
         ln -s ~{reference_fa} ref.fa
 
-        if [ ~{ubam} == "true" ]
-        then
-            samtools fastq ~{fastq} | ngmlr -t ~{threadAlign} -x ont --skip-write -r ref.fa | samtools sort -@ ~{threadSort} -o ~{sample}_ngmlr.bam
-        else
-            ngmlr -t ~{threadAlign} -x ont --skip-write -r ref.fa -q ~{fastq} | samtools sort -@ ~{threadSort} -o ~{sample}_ngmlr.bam
-        fi
-
-        
-        samtools index -@ ~{threadCount} ~{sample}_ngmlr.bam ~{sample}_ngmlr.bai
+        ngmlr -t ~{threadAlign} -x ont --skip-write -r ref.fa -q ~{fastq} --no-progress | samtools sort -@ ~{threadSort} -o ~{sample}_ngmlr.bam
+        samtools index -@ ~{thread_count} ~{sample}_ngmlr.bam ~{sample}_ngmlr.bai
     >>>
     output {
         File bam = "~{sample}_ngmlr.bam"
@@ -116,9 +125,9 @@ task alignReadsNGMLR {
     }
     runtime {
         docker: dockerImage
-        cpu: threadCount
+        cpu: thread_count
         disks: "local-disk " + disk_size + " SSD"
-        memory: memoryGB + "GB"
+        memory: memory_gb + "GB"
     }
 }
 
@@ -129,8 +138,8 @@ task callSVsniffles {
 	File vntr = ""
         String sample = ""
 	Int minSvLen = 40
-        Int threadCount = 8
-        Int memoryGB = 32
+        Int thread_count = 8
+        Int memory_gb = 32
         String dockerImage = "quay.io/biocontainers/sniffles@sha256:feb1c41eae608ebc2c2cb594144bb3c221b87d9bb691d0af6ad06b49fd54573a"
         Int disk_size = 3 * round(size(bam, 'G')) + 20
   }
@@ -150,7 +159,7 @@ task callSVsniffles {
     ln -s ~{bam} reads.bam
     ln -s ~{bai} reads.bam.bai
     
-    sniffles -i reads.bam -v ~{sample}_sniffles.vcf -t ~{threadCount} ${TRF_ARG} --minsvlen ~{minSvLen} 2>&1 | tee sniffles.log
+    sniffles -i reads.bam -v ~{sample}_sniffles.vcf -t ~{thread_count} ${TRF_ARG} --minsvlen ~{minSvLen} --output-rnames --min-alignment-length 500 2>&1 | tee sniffles.log
     gzip ~{sample}_sniffles.vcf
   >>>
 
@@ -161,8 +170,76 @@ task callSVsniffles {
 
   runtime {
       docker: dockerImage
-      cpu: threadCount
+      cpu: thread_count
       disks: "local-disk " + disk_size + " SSD"
-      memory: memoryGB + "GB"
+      memory: memory_gb + "GB"
   }
+}
+
+task splitReads {
+    input {
+        File reads
+        Int readsPerChunk
+        Boolean ubam = false
+        Int thread_count = 8
+        Int disk_size = 5 * round(size(reads, "G")) + 20
+    }
+
+    Int gzThread_count = if thread_count > 1 then thread_count - 1 else 1
+    Int chunkLines = readsPerChunk * 4
+    command <<<
+        set -o pipefail
+        set -e
+        set -u
+        set -o xtrace
+
+        if [ ~{ubam} == "true" ]
+        then
+            samtools fastq -TMm,Ml,MM,ML ~{reads} | split -l ~{chunkLines} --filter='pigz -p ~{gzThread_count} > ${FILE}.fq.gz' - "fq_chunk.part."
+        else
+            gzip -cd ~{reads} | split -l ~{chunkLines} --filter='pigz -p ~{gzThread_count} > ${FILE}.fq.gz' - "fq_chunk.part."
+        fi
+    >>>
+    output {
+        Array[File] readChunks = glob("fq_chunk.part.*")
+    }
+    runtime {
+        preemptible: 2
+        time: 120
+        cpu: thread_count
+        memory: "4 GB"
+        disks: "local-disk " + disk_size + " SSD"
+        docker: "quay.io/jmonlong/minimap2_samtools:v2.24_v1.16.1_pigz"
+    }
+}
+
+task mergeBAM {
+    input {
+        Array[File] bams
+        String outname = "merged"
+        Int thread_count = 8
+        Int disk_size = round(5 * size(bams, 'G')) + 20
+        Int memory_gb = 8
+    }
+
+    command <<<
+        set -o pipefail
+        set -e
+        set -u
+        set -o xtrace
+
+        samtools merge -f -p -c --threads ~{thread_count} ~{outname}.bam ~{sep=" " bams}
+        samtools index ~{outname}.bam
+    >>>
+    output {
+        File bam = "~{outname}.bam"
+        File bai = "~{outname}.bam.bai"
+    }
+    runtime {
+        preemptible: 2
+        memory: memory_gb + " GB"
+        cpu: thread_count
+        disks: "local-disk " + disk_size + " SSD"
+        docker: "biocontainers/samtools@sha256:3ff48932a8c38322b0a33635957bc6372727014357b4224d420726da100f5470"
+    }
 }

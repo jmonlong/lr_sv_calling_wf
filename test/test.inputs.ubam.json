@@ -1,0 +1,7 @@
+{
+    "lr_sv_calling.FASTQ": "test/reads.bam",
+    "lr_sv_calling.FASTQ_IS_UBAM": true,
+    "lr_sv_calling.REFERENCE_FASTA": "test/ref.fa",
+    "lr_sv_calling.VNTR": "test/vntr.bed",
+    "lr_sv_calling.SAMPLE": "test"
+}
