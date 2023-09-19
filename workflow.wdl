@@ -124,6 +124,7 @@ task alignReadsNGMLR {
         File bai = "~{sample}_ngmlr.bai"
     }
     runtime {
+        preemptible: 2
         docker: dockerImage
         cpu: thread_count
         disks: "local-disk " + disk_size + " SSD"
@@ -169,6 +170,7 @@ task callSVsniffles {
   }
 
   runtime {
+      preemptible: 2
       docker: dockerImage
       cpu: thread_count
       disks: "local-disk " + disk_size + " SSD"
