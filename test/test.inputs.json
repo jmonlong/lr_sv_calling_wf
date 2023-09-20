@@ -2,5 +2,6 @@
     "lr_sv_calling.FASTQ": "test/reads.fastq.gz",
     "lr_sv_calling.REFERENCE_FASTA": "test/ref.fa",
     "lr_sv_calling.VNTR": "test/vntr.bed",
-    "lr_sv_calling.SAMPLE": "test"
+    "lr_sv_calling.SAMPLE": "test",
+    "lr_sv_calling.ALIGNER": "minimap2"
 }

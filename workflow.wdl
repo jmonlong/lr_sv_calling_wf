@@ -12,7 +12,7 @@ workflow lr_sv_calling {
         FASTQ_IS_UBAM: "Is the FASTQ file actually a unmapped BAM file? Default is false"
         BAM: "Aligned reads in BAM. Optional. If provided, no alignment performed."
         BAI: "Aligned reads index. Optional. If provided, no alignment performed."
-        ALIGNER: "Which aligner to use? 'ngmlr' (default)"
+        ALIGNER: "Which aligner to use? 'ngmlr' (default) or 'minimap2'"
         CALLER: "Which caller to use? 'sniffles' (default)"
         REFERENCE_FASTA: "Genome reference FASTA file"
         SAMPLE: "Optional. Sample name. "
@@ -52,7 +52,18 @@ workflow lr_sv_calling {
             }
         }
 
-        Array[File] alignedBamFiles = select_all(select_first([alignReadsNGMLR.bam]))
+        if ( ALIGNER == 'minimap2') {
+            scatter (readChunk in splitReads.readChunks){
+                call alignReadsMinimap2 {
+                    input:
+                    fastq=readChunk,
+                    reference_fa=REFERENCE_FASTA,
+                    sample=SAMPLE
+                }
+            }
+        }
+
+        Array[File] alignedBamFiles = select_first([alignReadsNGMLR.bam, alignReadsMinimap2.bam])
 
         call mergeBAM {
 	    input:
@@ -94,7 +105,7 @@ task alignReadsNGMLR {
         File reference_fa
         String sample = ""
         Int thread_count = 32
-        Int memory_gb = 16
+        Int memory_gb = 32
         String dockerImage="quay.io/jmonlong/ngmlr@sha256:ce25d81d1a44f7bcdacef0008ac7542c5e9885d074f6446d6a8549219c91807e"
         Int disk_size = 3 * round(size(fastq, 'G') + size(reference_fa, 'G')) + 20
     }
@@ -122,6 +133,50 @@ task alignReadsNGMLR {
     output {
         File bam = "~{sample}_ngmlr.bam"
         File bai = "~{sample}_ngmlr.bai"
+    }
+    runtime {
+        preemptible: 2
+        docker: dockerImage
+        cpu: thread_count
+        disks: "local-disk " + disk_size + " SSD"
+        memory: memory_gb + "GB"
+    }
+}
+
+task alignReadsMinimap2 {
+    input {
+        File fastq
+        File reference_fa
+        String sample = ""
+        Int thread_count = 32
+        Int memory_gb = 16
+        String dockerImage="mkolmogo/card_minimap2:2.23"
+        Int disk_size = 3 * round(size(fastq, 'G') + size(reference_fa, 'G')) + 20
+    }
+
+    Int threadSort = if thread_count > 8 then 4 else 1
+    Int threadAlign = if thread_count > 8 then thread_count - 4 else thread_count - 1
+    
+    command <<<
+        # Set the exit code of a pipeline to that of the rightmost command
+        # to exit with a non-zero status, or zero if all commands of the pipeline exit
+        set -o pipefail
+        # cause a bash script to exit immediately when a command fails
+        set -e
+        # cause the bash shell to treat unset variables as an error and exit immediately
+        set -u
+        # echo each line of the script to stdout so we can see what is happening
+        # to turn off echo do 'set +o xtrace'
+        set -o xtrace
+
+        ln -s ~{reference_fa} ref.fa
+
+        minimap2 -a -t ~{threadAlign} -Y -x map-ont ref.fa ~{fastq} | samtools sort -@ ~{threadSort} -o ~{sample}_minimap2.bam
+        samtools index -@ ~{thread_count} ~{sample}_minimap2.bam ~{sample}_minimap2.bai
+    >>>
+    output {
+        File bam = "~{sample}_minimap2.bam"
+        File bai = "~{sample}_minimap2.bai"
     }
     runtime {
         preemptible: 2
