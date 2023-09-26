@@ -108,6 +108,7 @@ task alignReadsNGMLR {
         Int memory_gb = 32
         String dockerImage="quay.io/jmonlong/ngmlr@sha256:ce25d81d1a44f7bcdacef0008ac7542c5e9885d074f6446d6a8549219c91807e"
         Int disk_size = 3 * round(size(fastq, 'G') + size(reference_fa, 'G')) + 20
+        Int preemptible = 1
     }
 
     Int threadSort = if thread_count > 8 then 4 else 1
@@ -135,7 +136,7 @@ task alignReadsNGMLR {
         File bai = "~{sample}_ngmlr.bai"
     }
     runtime {
-        preemptible: 2
+        preemptible: preemptible
         docker: dockerImage
         cpu: thread_count
         disks: "local-disk " + disk_size + " SSD"
