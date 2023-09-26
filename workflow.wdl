@@ -285,7 +285,7 @@ task mergeBAM {
         set -u
         set -o xtrace
 
-        samtools merge -f -p -c --threads ~{thread_count} ~{outname}.bam ~{sep=" " bams}
+        samtools merge -f -p -c --threads ~{thread_count} -b ~{write_lines(bams)} ~{outname}.bam
         samtools index ~{outname}.bam
     >>>
     output {
