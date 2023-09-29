@@ -12,11 +12,13 @@ workflow lr_sv_calling {
         FASTQ_IS_UBAM: "Is the FASTQ file actually a unmapped BAM file? Default is false"
         BAM: "Aligned reads in BAM. Optional. If provided, no alignment performed."
         BAI: "Aligned reads index. Optional. If provided, no alignment performed."
-        ALIGNER: "Which aligner to use? 'ngmlr' (default) or 'minimap2'"
+        ALIGNER: "Which aligner to use? 'ngmlr' (default), 'minimap2', or 'winnowmap2'"
         CALLER: "Which caller to use? 'sniffles' (default)"
         REFERENCE_FASTA: "Genome reference FASTA file"
         SAMPLE: "Optional. Sample name. "
         READS_PER_CHUNK: "Number of input reads per chunk (to scale up alignment). Default is 700000"
+        VNTR: "Optional. BED annotation of VNTR location for Sniffles."
+        REPK_WM: "Optional. K-mer file used by Winnowmap2. Will be recomputed if not provided."
     }
 
     input {
@@ -27,6 +29,7 @@ workflow lr_sv_calling {
         String ALIGNER = 'ngmlr'
         String CALLER = 'sniffles'
         File? VNTR
+        File? REPK_WM
         File REFERENCE_FASTA
         String SAMPLE = "sample"
         Int READS_PER_CHUNK = 700000
@@ -63,7 +66,28 @@ workflow lr_sv_calling {
             }
         }
 
-        Array[File] alignedBamFiles = select_first([alignReadsNGMLR.bam, alignReadsMinimap2.bam])
+        if ( ALIGNER == 'winnowmap2') {
+            if (!defined(REPK_WM)){
+                call prepareWinnowmap2Ref {
+                    input:
+                    reference_fa=REFERENCE_FASTA
+                }
+            }
+
+            File repk_txt = select_first([REPK_WM, prepareWinnowmap2Ref.repk])
+            
+            scatter (readChunk in splitReads.readChunks){
+                call alignReadsWinnowmap2 {
+                    input:
+                    fastq=readChunk,
+                    reference_fa=REFERENCE_FASTA,
+                    sample=SAMPLE,
+                    repk_txt=repk_txt
+                }
+            }
+        }
+
+        Array[File] alignedBamFiles = select_first([alignReadsNGMLR.bam, alignReadsMinimap2.bam, alignReadsWinnowmap2.bam])
 
         call mergeBAM {
 	    input:
@@ -92,6 +116,7 @@ workflow lr_sv_calling {
         File sv_vcf = svVcf
         File? bam = mergeBAM.bam
         File? bai = mergeBAM.bai
+        File? repk = prepareWinnowmap2Ref.repk
     }
 }
 
@@ -178,6 +203,89 @@ task alignReadsMinimap2 {
     output {
         File bam = "~{sample}_minimap2.bam"
         File bai = "~{sample}_minimap2.bai"
+    }
+    runtime {
+        preemptible: 2
+        docker: dockerImage
+        cpu: thread_count
+        disks: "local-disk " + disk_size + " SSD"
+        memory: memory_gb + "GB"
+    }
+}
+
+task prepareWinnowmap2Ref {
+    input {
+        File reference_fa
+        Int thread_count = 4
+        Int memory_gb = 8
+        String dockerImage="quay.io/jmonlong/winnowmap@sha256:3c1a1d43451552c30c2d76b326ae83d8db9e51676af69a4116fb212c16132c31"
+        Int disk_size = 3 * round(size(reference_fa, 'G')) + 20
+    }
+    
+    command <<<
+        # Set the exit code of a pipeline to that of the rightmost command
+        # to exit with a non-zero status, or zero if all commands of the pipeline exit
+        set -o pipefail
+        # cause a bash script to exit immediately when a command fails
+        set -e
+        # cause the bash shell to treat unset variables as an error and exit immediately
+        set -u
+        # echo each line of the script to stdout so we can see what is happening
+        # to turn off echo do 'set +o xtrace'
+        set -o xtrace
+
+        ln -s ~{reference_fa} ref.fa
+
+        meryl count k=15 output merylDB ref.fa
+        meryl print greater-than distinct=0.9998 merylDB > repetitive_k15.txt
+    >>>
+    output {
+        File repk = "repetitive_k15.txt"
+    }
+    runtime {
+        preemptible: 2
+        docker: dockerImage
+        cpu: thread_count
+        disks: "local-disk " + disk_size + " SSD"
+        memory: memory_gb + "GB"
+    }
+}
+
+task alignReadsWinnowmap2 {
+    input {
+        File fastq
+        File reference_fa
+        File repk_txt
+        String sample = ""
+        Int thread_count = 32
+        Int memory_gb = 16
+        String dockerImage="quay.io/jmonlong/winnowmap@sha256:3c1a1d43451552c30c2d76b326ae83d8db9e51676af69a4116fb212c16132c31"
+        Int disk_size = 3 * round(size(fastq, 'G') + size(reference_fa, 'G') + size(repk_txt, 'G')) + 20
+    }
+
+    Int threadSort = if thread_count > 8 then 4 else 1
+    Int threadAlign = if thread_count > 8 then thread_count - 4 else thread_count - 1
+    
+    command <<<
+        # Set the exit code of a pipeline to that of the rightmost command
+        # to exit with a non-zero status, or zero if all commands of the pipeline exit
+        set -o pipefail
+        # cause a bash script to exit immediately when a command fails
+        set -e
+        # cause the bash shell to treat unset variables as an error and exit immediately
+        set -u
+        # echo each line of the script to stdout so we can see what is happening
+        # to turn off echo do 'set +o xtrace'
+        set -o xtrace
+
+        ln -s ~{reference_fa} ref.fa
+
+        winnowmap -W ~{repk_txt} -ax map-ont -Y -t ~{threadAlign} ref.fa ~{fastq} | samtools sort -@ ~{threadSort} -o ~{sample}_winnowmap2.bam
+        samtools index -@ ~{thread_count} ~{sample}_winnowmap2.bam ~{sample}_winnowmap2.bai
+    >>>
+    output {
+        File bam = "~{sample}_winnowmap2.bam"
+        File bai = "~{sample}_winnowmap2.bai"
     }
     runtime {
         preemptible: 2
